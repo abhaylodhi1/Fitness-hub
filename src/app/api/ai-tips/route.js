@@ -35,93 +35,116 @@ export async function POST(req) {
       );
     }
 
-    // Initialize the Gemini client
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    // For free API keys, let's try to use available models and have good fallbacks
+    let aiResponse = null;
     
-    // Use a reliable model
-    const model = genAI.getGenerativeModel({ 
-      model: "gemini-1.5-flash-latest",
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 2000,
+    try {
+      // Initialize the Gemini client
+      const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+      
+      // Try different model names that might work with free tier
+      const availableModels = [
+        "gemini-pro",
+        "models/gemini-pro",
+        "gemini-1.0-pro",
+        "models/gemini-1.0-pro"
+      ];
+      
+      let model;
+      let modelError = null;
+      
+      // Try each model until one works
+      for (const modelName of availableModels) {
+        try {
+          model = genAI.getGenerativeModel({ 
+            model: modelName,
+            generationConfig: {
+              temperature: 0.7,
+              maxOutputTokens: 1000, // Reduced for free tier
+            }
+          });
+          
+          // Test the model with a simple prompt
+          const testResult = await model.generateContent("Say 'Hello'");
+          const testResponse = await testResult.response;
+          console.log(`Model ${modelName} is working`);
+          break; // If we get here, the model works
+        } catch (err) {
+          modelError = err;
+          console.log(`Model ${modelName} failed:`, err.message);
+          continue; // Try next model
+        }
       }
-    });
+      
+      if (!model) {
+        throw new Error("No working models found with free API key");
+      }
 
-    const prompt = `
-You are an expert fitness and nutrition consultant. Please provide personalized advice based on the following user profile:
+      const prompt = `
+Create a personalized fitness and nutrition plan based on this profile:
 
-USER PROFILE:
-- Weight: ${weight} kg
-- Height: ${height} cm
-- Age: ${age} years
-- Gender: ${gender}
-- Activity Level: ${activity}
-- BMI: ${bmi} (${getBMICategory(parseFloat(bmi))})
-- Diet Preference: ${dietPreference}
-- Goal: ${goal}
+Weight: ${weight} kg
+Height: ${height} cm  
+Age: ${age} years
+Gender: ${gender}
+Activity: ${activity}
+BMI: ${bmi}
+Diet: ${dietPreference}
+Goal: ${goal}
 
-REQUEST:
-1. Provide 5 concise, actionable health and fitness tips specific to this user's profile
-2. Create a sample daily diet plan with 4-5 meals (breakfast, lunch, snack, dinner) that includes:
-   - Meal names
-   - Suggested timing (e.g., "8:00 AM")
-   - Specific food items appropriate for their ${dietPreference} diet
-   - Approximate calories per meal
-   - Total daily calories should align with their ${goal} goal
+Provide:
+1. 5 specific health tips
+2. A daily meal plan with 4 meals
 
-RESPONSE FORMAT:
-Return ONLY a JSON object with this exact structure:
+Return as JSON:
 {
   "tips": ["tip1", "tip2", "tip3", "tip4", "tip5"],
   "dietPlan": [
-    {
-      "name": "Meal Name",
-      "time": "HH:MM AM/PM",
-      "items": "Food description",
-      "calories": "XXX kcal"
-    }
+    {"name": "Breakfast", "time": "8:00 AM", "items": "food", "calories": "XXX kcal"},
+    {"name": "Lunch", "time": "12:30 PM", "items": "food", "calories": "XXX kcal"},
+    {"name": "Snack", "time": "3:30 PM", "items": "food", "calories": "XXX kcal"},
+    {"name": "Dinner", "time": "7:00 PM", "items": "food", "calories": "XXX kcal"}
   ]
 }
-
-Important: Return only valid JSON without any additional text, explanations, or markdown formatting.
 `;
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
-    
-    // Clean and parse the response
-    const cleanedText = text.replace(/```json|```/g, '').trim();
-    
-    try {
-      const data = JSON.parse(cleanedText);
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text();
       
-      // Validate the response structure
-      if (!data.tips || !data.dietPlan || !Array.isArray(data.tips) || !Array.isArray(data.dietPlan)) {
-        throw new Error("Invalid response structure from AI");
+      // Clean and parse the response
+      const cleanedText = text.replace(/```json|```/g, '').trim();
+      
+      try {
+        aiResponse = JSON.parse(cleanedText);
+      } catch (parseError) {
+        // If JSON parsing fails, use extracted tips with fallback diet
+        const tips = extractTipsFromText(text);
+        aiResponse = {
+          tips: tips.length >= 3 ? tips : getFallbackTips(goal, dietPreference),
+          dietPlan: getFallbackDietPlan(dietPreference)
+        };
       }
       
-      return new Response(JSON.stringify(data), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    } catch (parseError) {
-      console.error("JSON parsing failed, using fallback:", parseError);
-      // If JSON parsing fails, extract tips from text and use fallback diet plan
-      const tips = extractTipsFromText(text);
-      return new Response(JSON.stringify({
-        tips: tips.length >= 3 ? tips : getFallbackTips(goal, dietPreference),
+    } catch (aiError) {
+      console.error("AI service unavailable with free API key:", aiError.message);
+      // Use comprehensive fallback data
+      aiResponse = {
+        tips: getFallbackTips(goal, dietPreference),
         dietPlan: getFallbackDietPlan(dietPreference)
-      }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
+      };
     }
+
+    return new Response(JSON.stringify(aiResponse), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+
   } catch (error) {
-    console.error("AI API Error:", error);
+    console.error("General error:", error);
     return new Response(JSON.stringify({ 
-      tips: getFallbackTips(goal, dietPreference),
-      dietPlan: getFallbackDietPlan(dietPreference)
+      tips: getFallbackTips('maintain', 'balanced'),
+      dietPlan: getFallbackDietPlan('balanced')
     }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
@@ -129,7 +152,7 @@ Important: Return only valid JSON without any additional text, explanations, or 
   }
 }
 
-// Helper function to determine BMI category
+// Enhanced helper functions with more comprehensive fallbacks
 function getBMICategory(bmi) {
   if (bmi < 18.5) return "Underweight";
   if (bmi < 25) return "Normal weight";
@@ -137,16 +160,12 @@ function getBMICategory(bmi) {
   return "Obese";
 }
 
-// Helper function to extract tips from text if JSON parsing fails
 function extractTipsFromText(text) {
   try {
-    // Look for numbered tips or bullet points
     const tipMatches = text.match(/(?:\d+\.\s|[-•*]\s)(.+?)(?=\n\d+\.|\n[-•*]|\n\n|$)/g);
     if (tipMatches) {
       return tipMatches.map(tip => tip.replace(/^\d+\.\s|^[-•*]\s/, '').trim()).slice(0, 5);
     }
-    
-    // Fallback: split by new lines and take meaningful ones
     return text.split('\n')
       .filter(line => line.trim().length > 20 && !line.includes('{') && !line.includes('}'))
       .slice(0, 5)
@@ -156,97 +175,67 @@ function extractTipsFromText(text) {
   }
 }
 
-// Fallback tips for when the AI service is unavailable
 function getFallbackTips(goal, dietPreference) {
-  const baseTips = [
-    "Stay hydrated by drinking at least 8 glasses of water daily",
-    "Aim for 7-9 hours of quality sleep each night",
-    "Incorporate both cardio and strength training in your routine",
-    "Focus on whole foods and minimize processed foods",
-    "Consider consulting with a nutritionist for personalized advice"
-  ];
-
-  const goalSpecificTips = {
+  const goalTips = {
     lose: [
-      "Create a moderate calorie deficit of 300-500 calories per day",
-      "Focus on protein-rich foods to maintain muscle mass while losing fat",
-      "Incorporate high-fiber foods to help you feel full longer"
+      "Aim for a 300-500 calorie deficit daily for sustainable weight loss",
+      "Include 30-45 minutes of cardio 4-5 times per week",
+      "Focus on lean protein to maintain muscle while losing fat",
+      "Drink water before meals to help control appetite",
+      "Get 7-8 hours of sleep to support metabolism and recovery"
     ],
     maintain: [
-      "Balance your macronutrients for sustained energy throughout the day",
-      "Listen to your body's hunger and fullness cues",
-      "Maintain consistent meal timing for metabolic regularity"
+      "Balance your macronutrients: 40% carbs, 30% protein, 30% fat",
+      "Mix strength training with cardio for overall fitness",
+      "Practice mindful eating and listen to hunger cues",
+      "Stay consistent with your meal timing and exercise routine",
+      "Include variety in your workouts to prevent plateaus"
     ],
     gain: [
-      "Aim for a calorie surplus of 300-500 calories per day for lean mass gain",
-      "Prioritize protein intake to support muscle growth and recovery",
-      "Consider nutrient-dense calorie sources rather than empty calories"
+      "Aim for 300-500 calorie surplus with focus on protein",
+      "Prioritize compound exercises like squats and deadlifts",
+      "Consume protein within 30 minutes after workouts",
+      "Eat every 3-4 hours to maintain positive nitrogen balance",
+      "Track your progress and adjust calories as needed"
     ]
   };
 
-  return [...(goalSpecificTips[goal] || []).slice(0, 2), ...baseTips.slice(0, 3)];
+  return goalTips[goal] || goalTips.maintain;
 }
 
-// Fallback diet plan for when the AI service is unavailable
 function getFallbackDietPlan(dietPreference) {
-  const basePlan = [
-    {
-      name: "Breakfast",
-      time: "8:00 AM",
-      items: "Oatmeal with berries and nuts",
-      calories: "350 kcal"
-    },
-    {
-      name: "Lunch",
-      time: "12:30 PM",
-      items: "Grilled chicken salad with quinoa and vegetables",
-      calories: "450 kcal"
-    },
-    {
-      name: "Snack",
-      time: "3:30 PM",
-      items: "Greek yogurt with honey and almonds",
-      calories: "200 kcal"
-    },
-    {
-      name: "Dinner",
-      time: "7:00 PM",
-      items: "Baked salmon with roasted vegetables and sweet potato",
-      calories: "500 kcal"
-    }
-  ];
-
-  const dietModifications = {
-    vegetarian: {
-      Lunch: "Vegetable stir-fry with tofu and brown rice",
-      Dinner: "Lentil curry with whole grain naan"
-    },
-    vegan: {
-      Breakfast: "Smoothie bowl with plant-based protein, fruits, and seeds",
-      Lunch: "Chickpea and vegetable curry with quinoa",
-      Dinner: "Vegan Buddha bowl with tempeh and tahini dressing",
-      Snack: "Hummus with vegetable sticks"
-    },
-    lowCarb: {
-      Breakfast: "Vegetable omelette with avocado",
-      Lunch: "Grilled chicken Caesar salad (no croutons)",
-      Dinner: "Zucchini noodles with meatballs and marinara sauce",
-      Snack: "Cheese and nuts"
-    },
-    highProtein: {
-      Breakfast: "Scrambled eggs with spinach and turkey bacon",
-      Lunch: "Grilled chicken breast with steamed broccoli and quinoa",
-      Dinner: "Lean steak with asparagus and sweet potato",
-      Snack: "Protein shake with banana"
-    }
+  const dietPlans = {
+    balanced: [
+      { name: "Breakfast", time: "8:00 AM", items: "Oatmeal with berries, almonds, and Greek yogurt", calories: "400 kcal" },
+      { name: "Lunch", time: "12:30 PM", items: "Grilled chicken salad with quinoa, mixed vegetables, and olive oil dressing", calories: "500 kcal" },
+      { name: "Snack", time: "3:30 PM", items: "Apple with peanut butter and a handful of nuts", calories: "250 kcal" },
+      { name: "Dinner", time: "7:00 PM", items: "Baked salmon with roasted sweet potatoes and steamed broccoli", calories: "550 kcal" }
+    ],
+    vegetarian: [
+      { name: "Breakfast", time: "8:00 AM", items: "Scrambled tofu with spinach, whole grain toast, and avocado", calories: "400 kcal" },
+      { name: "Lunch", time: "12:30 PM", items: "Quinoa bowl with chickpeas, roasted vegetables, and tahini dressing", calories: "450 kcal" },
+      { name: "Snack", time: "3:30 PM", items: "Greek yogurt with honey and mixed nuts", calories: "200 kcal" },
+      { name: "Dinner", time: "7:00 PM", items: "Lentil curry with brown rice and side salad", calories: "500 kcal" }
+    ],
+    vegan: [
+      { name: "Breakfast", time: "8:00 AM", items: "Smoothie bowl with banana, berries, plant protein, chia seeds", calories: "350 kcal" },
+      { name: "Lunch", time: "12:30 PM", items: "Buddha bowl with quinoa, roasted chickpeas, avocado, and vegetables", calories: "450 kcal" },
+      { name: "Snack", time: "3:30 PM", items: "Hummus with carrot and cucumber sticks", calories: "200 kcal" },
+      { name: "Dinner", time: "7:00 PM", items: "Black bean burgers with sweet potato fries and salad", calories: "500 kcal" }
+    ],
+    lowCarb: [
+      { name: "Breakfast", time: "8:00 AM", items: "Vegetable omelette with cheese and avocado", calories: "400 kcal" },
+      { name: "Lunch", time: "12:30 PM", items: "Grilled chicken Caesar salad (no croutons) with Parmesan", calories: "450 kcal" },
+      { name: "Snack", time: "3:30 PM", items: "Celery sticks with almond butter and string cheese", calories: "180 kcal" },
+      { name: "Dinner", time: "7:00 PM", items: "Zucchini noodles with meatballs and sugar-free marinara", calories: "500 kcal" }
+    ],
+    highProtein: [
+      { name: "Breakfast", time: "8:00 AM", items: "3-egg omelette with turkey bacon and cottage cheese", calories: "450 kcal" },
+      { name: "Lunch", time: "12:30 PM", items: "Grilled chicken breast with quinoa and steamed vegetables", calories: "500 kcal" },
+      { name: "Snack", time: "3:30 PM", items: "Protein shake with banana and almond milk", calories: "250 kcal" },
+      { name: "Dinner", time: "7:00 PM", items: "Lean steak with roasted potatoes and asparagus", calories: "550 kcal" }
+    ]
   };
 
-  if (dietModifications[dietPreference]) {
-    return basePlan.map(meal => ({
-      ...meal,
-      items: dietModifications[dietPreference][meal.name] || meal.items
-    }));
-  }
-
-  return basePlan;
+  return dietPlans[dietPreference] || dietPlans.balanced;
 }
